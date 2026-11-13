@@ -1,17 +1,23 @@
 FROM debian:bookworm-slim
 
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl iproute2 iptables \
- && rm -rf /var/lib/apt/lists/* \
- && curl -fsSL https://tailscale.com/install.sh | sh
+ENV DEBIAN_FRONTEND=noninteractive \
+    TS_STATE_DIR=/data \
+    TS_SOCKET=/run/tailscale/tailscaled.sock \
+    TS_HOSTNAME=railway-smart-exit \
+    TS_DIAG_INTERVAL=60 \
+    TS_NETCHECK_INTERVAL=600 \
+    TS_LOG_LEVEL=info
 
-COPY scripts/start.sh /usr/local/bin/start-tailscale
-RUN chmod +x /usr/local/bin/start-tailscale \
- && mkdir -p /data /run/tailscale
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl iproute2 procps util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://tailscale.com/install.sh | sh
 
-ENV TS_STATE_DIR=/data
-ENV TS_SOCKET=/run/tailscale/tailscaled.sock
-ENV TS_HOSTNAME=railway-exit-node
+WORKDIR /app
+COPY scripts/ /app/scripts/
+RUN chmod +x /app/scripts/*.sh \
+    && mkdir -p /data /run/tailscale
 
-CMD ["/usr/local/bin/start-tailscale"]
+VOLUME ["/data"]
+
+ENTRYPOINT ["/app/scripts/start.sh"]

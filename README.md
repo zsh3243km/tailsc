@@ -1,67 +1,85 @@
-# Railway Tailscale Userspace Exit Node
+# Railway Tailscale Smart Exit Node
 
-This project runs **Tailscale as a userspace/netstack exit node** on Railway.
-It is not a standalone WireGuard server.
+A diagnostic-focused, self-monitoring Tailscale **userspace/netstack exit node** for Railway.
 
-## What this does
+## What is improved
 
-- Runs `tailscaled` with `--tun=userspace-networking`.
-- Authenticates using a Tailscale auth key supplied as a Railway variable.
-- Advertises the node as an exit node.
-- Does not require `/dev/net/tun`, `NET_ADMIN`, privileged mode, or an inbound UDP port.
-- Can use Tailscale DERP relays when a direct peer-to-peer UDP path is unavailable.
+- Continuous health checks against the local Tailscale daemon.
+- Periodic CPU, memory, load, interface byte-counter and MTU measurements.
+- Periodic `tailscale netcheck` output in Railway deployment logs.
+- Persistent node state under `/data`.
+- No dependency on `/dev/net/tun`, `NET_ADMIN`, privileged mode, or a public inbound UDP port.
+- No arbitrary MTU/sysctl changes that could make networking worse.
 
-Tailscale documents userspace routers/exit nodes here:
-https://tailscale.com/docs/reference/kernel-vs-userspace-routers
+## Important: what "self-speed optimization" can and cannot do
 
-Railway TCP Proxy is TCP-only and is not used by this project:
-https://docs.railway.com/networking/tcp-proxy
+There is no safe universal switch that makes a userspace exit node faster. The optimizer collects measurements and identifies likely bottlenecks; it deliberately does **not** change MTU, routes, congestion control, or kernel networking settings automatically. Those changes are platform- and path-dependent, and a bad value can reduce throughput or disconnect the node.
 
-## Deploy on Railway
+Your current Railway measurements showed:
+- Tailscale peer connection is `direct`, not DERP.
+- `railnet0` MTU is 1316 and `tunl0` MTU is 1480.
+- Container CPU quota is 2 cores and memory limit is about 1 GiB.
+- A short CPU sampling showed low `tailscaled` CPU use during that sample.
+These facts do not yet prove the MTU is the bottleneck. The logs from this version are intended to collect comparable data during an actual download.
 
-1. Create a new Railway project and deploy this folder/repository using the included Dockerfile.
-2. In Tailscale Admin Console, create an auth key:
-   https://login.tailscale.com/admin/settings/keys
-   Prefer a short-lived, reusable key only if you need repeated provisioning. Do not commit it.
-3. In Railway, add these service variables:
-   - `TS_AUTHKEY` = your Tailscale auth key
-   - `TS_HOSTNAME` = `railway-exit-node` (optional)
-4. Add a Railway Volume mounted at `/data`. This preserves the Tailscale node identity between restarts.
-5. Deploy and inspect the deployment logs. A successful startup prints the Tailscale status and IPv4 address.
-6. Open https://login.tailscale.com/admin/machines and locate `railway-exit-node`.
-7. If the admin console shows an exit-node approval/action, approve the advertised exit route.
-8. On your Windows/macOS/mobile Tailscale client, select `railway-exit-node` under Exit Node.
-9. Verify the public IP from the client using https://ipinfo.io or https://icanhazip.com.
+The project remains userspace mode because the current Railway container has no `/dev/net/tun`. Root inside the container does not create host TUN device access. Kernel-mode Tailscale would require host/device capabilities Railway may not provide.
 
-## Important limitations
+## Deploy
 
-- **This is a Tailscale exit node, not a generic public SOCKS5/HTTP proxy.**
-- **This is not a standalone WireGuard server.** Railway's public TCP Proxy does not transport UDP, which standard WireGuard requires.
-- Userspace mode can relay TCP/UDP connections through Tailscale's netstack, but it is not identical to kernel-mode packet forwarding. Some protocols and behaviors that depend on raw IP packets may differ.
-- Tailscale may use DERP relays if direct UDP connectivity cannot be established. This can increase latency and reduce throughput.
-- Railway may change platform behavior, resource limits, or networking constraints. This package cannot guarantee a specific speed or uninterrupted availability.
-- Do not expose a new public proxy port; the Tailscale control/DERP connections are initiated outbound.
+1. Deploy this folder/repository to Railway using the included Dockerfile.
+2. Add a Railway Volume mounted at `/data`.
+3. Add Railway Variable `TS_AUTHKEY` with a Tailscale auth key. Do not put the key in source control.
+4. Optionally set `TS_HOSTNAME=railway-smart-exit`.
+5. Deploy and wait for logs containing `[startup] tailscale is up`.
+6. In the Tailscale admin console, approve the advertised exit node if prompted.
+7. Select `railway-smart-exit` as Exit Node on your client.
+
+No Railway TCP Proxy is required. Do not expose a public port for this service.
+
+## Optional variables
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `TS_HOSTNAME` | `railway-smart-exit` | Tailnet machine name |
+| `TS_DIAG_INTERVAL` | `60` | Seconds between resource/interface snapshots |
+| `TS_NETCHECK_INTERVAL` | `600` | Seconds between Tailscale network checks |
+| `TS_VERBOSE` | `0` | Tailscaled verbosity |
+
+## How to use the optimizer logs
+
+During a client download, inspect Railway logs:
+- `cpu_approx=...`: approximate `tailscaled` CPU usage as a percentage of one core.
+- `memory=...`: cgroup memory usage and limit.
+- `interface=... mtu=... rx_bytes=... tx_bytes=...`: interface MTU and cumulative counters.
+- `[netcheck]`: UDP, public address, IPv4/IPv6 and DERP diagnostics.
+- `tailscale_status=healthy`: local daemon responds.
+
+For useful comparison, capture logs during:
+1. A download with the Exit Node enabled.
+2. A direct download with Exit Node disabled.
+
+## Limitations
+
+- This is not a standalone public WireGuard server. Railway TCP Proxy is TCP-only, while standard WireGuard requires UDP.
+- This is not a generic SOCKS5/HTTP proxy.
+- Userspace mode can act as an exit node but differs from kernel-mode packet forwarding and may have lower throughput or protocol limitations.
+- Direct peer connectivity does not guarantee high throughput; packet size, MTU/PMTU, routing, host constraints and the client network can still matter.
+- No fixed speed is guaranteed.
 
 ## Troubleshooting
 
-### No `TS_AUTHKEY`
-Set the Railway variable `TS_AUTHKEY` and redeploy.
+### Node not selectable as Exit Node
+Check Tailscale admin approval and Railway logs for `tailscale is up`.
 
-### Node appears in Tailscale but is not selectable as an exit node
-Check the machine's route/exit-node approval in the Tailscale admin console. Confirm the logs show the `tailscale up` command succeeded.
+### State resets after redeploy
+Ensure a Railway Volume is mounted at `/data`.
 
-### Node reconnects with a new identity after redeploy
-Ensure a Railway Volume is mounted at `/data`. Do not use an ephemeral filesystem for the state file if you want a stable node identity.
+### Need to inspect status manually
+Railway Shell:
+```sh
+tailscale --socket=/run/tailscale/tailscaled.sock status
+tailscale --socket=/run/tailscale/tailscaled.sock netcheck
+```
 
-### No direct connection / DERP relay
-This can be normal on hosted platforms. Check `tailscale status` and `tailscale ping <peer>` from a tailnet device. DERP fallback is encrypted but may be slower.
-
-### WireGuard app cannot connect to this service
-Expected: this project does not listen for public WireGuard UDP packets and cannot be configured as a standard WireGuard endpoint through Railway TCP Proxy.
-
-## Security
-
-- Keep `TS_AUTHKEY` only in Railway Variables; never put it in source control or logs.
-- Use an auth key with the shortest practical expiry and least privilege.
-- If the key is exposed, revoke it in the Tailscale admin console.
-- Restrict tailnet access using Tailscale access controls.
+### Security
+Keep `TS_AUTHKEY` in Railway Variables only. Revoke exposed keys and restrict access using tailnet ACL/grants.
