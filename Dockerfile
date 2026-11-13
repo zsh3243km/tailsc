@@ -18,6 +18,5 @@ COPY scripts/ /app/scripts/
 RUN chmod +x /app/scripts/*.sh \
     && mkdir -p /data /run/tailscale
 
-VOLUME ["/data"]
 
 ENTRYPOINT ["/app/scripts/start.sh"]
